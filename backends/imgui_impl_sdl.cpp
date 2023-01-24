@@ -73,9 +73,301 @@
 // (the multi-viewports feature requires SDL features supported from SDL 2.0.4+. SDL 2.0.5+ is highly recommended)
 #include <SDL.h>
 #include <SDL_syswm.h>
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+#include <SDL_keyboard.h>
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
+
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+#include <iostream>
+#include "sdl_keyboard_utils.h"
+
+// OpenGL
+//#include <GL/GL.h>
+#include <glad/glad.h>
+
+// CEF
+#include <cef_app.h>
+#include <cef_client.h>
+#include <cef_task.h>
+#include <wrapper/cef_helpers.h>
+
+// OpenGL Data
+static GLuint       g_CefTexture = 0;
+
+// CEF part
+class RenderHandler :
+    public CefRenderHandler
+{
+public:
+    RenderHandler(int w, int h) :
+        width(w),
+        height(h)
+    {
+    }
+
+    ~RenderHandler()
+    {
+
+    }
+
+    void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect &rect)
+    {
+        rect = CefRect(0, 0, width, height);
+    }
+
+    void OnPaint(CefRefPtr<CefBrowser> browser, PaintElementType type, const RectList &dirtyRects, const void * buffer, int w, int h)
+    {
+        //if (texture)
+        {
+            #define GL_BGRA_EXT 0x80E1
+            glBindTexture(GL_TEXTURE_2D, g_CefTexture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, buffer);
+        }
+    }
+
+    void resize(int w, int h)
+    {
+        width = w;
+        height = h;
+    }
+
+    void render()
+    {
+        //SDL_RenderCopy(renderer, texture, NULL, NULL);
+    }
+
+public:
+    int width;
+    int height;
+
+    IMPLEMENT_REFCOUNTING(RenderHandler);
+};
+
+// for manual render handler
+class BrowserClient :
+    public CefClient,
+    public CefLifeSpanHandler,
+    public CefLoadHandler
+{
+public:
+    BrowserClient(CefRefPtr<CefRenderHandler> ptr) :
+        handler(ptr)
+    {
+    }
+
+    virtual CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler()
+    {
+        return this;
+    }
+
+    virtual CefRefPtr<CefLoadHandler> GetLoadHandler()
+    {
+        return this;
+    }
+
+    virtual CefRefPtr<CefRenderHandler> GetRenderHandler()
+    {
+        return handler;
+    }
+
+    // CefLifeSpanHandler methods.
+    void OnAfterCreated(CefRefPtr<CefBrowser> browser)
+    {
+        // Must be executed on the UI thread.
+        CEF_REQUIRE_UI_THREAD();
+
+        browser_id = browser->GetIdentifier();
+    }
+
+    bool DoClose(CefRefPtr<CefBrowser> browser)
+    {
+        // Must be executed on the UI thread.
+        CEF_REQUIRE_UI_THREAD();
+
+        // Closing the main window requires special handling. See the DoClose()
+        // documentation in the CEF header for a detailed description of this
+        // process.
+        if (browser->GetIdentifier() == browser_id)
+        {
+            // Set a flag to indicate that the window close should be allowed.
+            closing = true;
+        }
+
+        // Allow the close. For windowed browsers this will result in the OS close
+        // event being sent.
+        return false;
+    }
+
+    void OnBeforeClose(CefRefPtr<CefBrowser> browser)
+    {
+    }
+
+    void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode)
+    {
+        printf("OnLoadEnd(%d)\n", httpStatusCode);
+        loaded = true;
+    }
+
+    bool OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefLoadHandler::ErrorCode errorCode, const CefString & failedUrl, CefString & errorText)
+    {
+        printf("OnLoadError(%d)\n", errorCode);
+        loaded = true;
+    }
+
+    void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool isLoading, bool canGoBack, bool canGoForward)
+    {
+        printf("OnLoadingStateChange()\n");
+    }
+
+    void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame)
+    {
+        printf("OnLoadStart()\n");
+    }
+
+    bool closeAllowed() const
+    {
+        return closing;
+    }
+
+    bool isLoaded() const
+    {
+        return loaded;
+    }
+
+private:
+    int browser_id;
+    bool closing = false;
+    bool loaded = false;
+    CefRefPtr<CefRenderHandler> handler;
+
+    IMPLEMENT_REFCOUNTING(BrowserClient);
+};
+
+CefBrowserHost::MouseButtonType translateMouseButton(SDL_MouseButtonEvent const &e)
+{
+    CefBrowserHost::MouseButtonType result;
+    switch (e.button)
+    {
+    case SDL_BUTTON_LEFT:
+    case SDL_BUTTON_X1: // NOTE: Mouse 4 (fwd)
+        result = MBT_LEFT;
+        break;
+
+    case SDL_BUTTON_MIDDLE:
+        result = MBT_MIDDLE;
+        break;
+
+    case SDL_BUTTON_RIGHT:
+    case SDL_BUTTON_X2: // NOTE: Mouse 5 (back)
+        result = MBT_RIGHT;
+        break;
+    default:
+        std::cout << "##### UNKNOWN Mouse Button" << std::endl;
+        break;
+    }
+
+    std::cout << "Mouse Button Mapped: " << e.button << "    to    " << result << std::endl;
+
+    return result;
+}
+
+int ImGui_ImplSDL2_CefInit(int argc, char** argv)
+{
+    CefMainArgs args;
+    int result = CefExecuteProcess(args, nullptr, nullptr);
+    // checkout CefApp, derive it and set it as second parameter, for more control on
+    // command args and resources.
+    if (result >= 0) // child proccess has endend, so exit.
+    {
+        return result;
+    }
+    else if (result == -1)
+    {
+        // we are here in the father proccess.
+    }
+
+
+    CefSettings settings;
+    // CefString(&settings.resources_dir_path).FromASCII("");
+    {
+        std::ostringstream ss;
+        ss << SDL_GetBasePath() << "locales/"; // TODO Unterordner "Resources" statt direkt in den root folder?
+        CefString(&settings.locales_dir_path) = ss.str();
+    }
+
+
+    // CefString(&settings.locales_dir_path).FromASCII("");
+    CefString(&settings.resources_dir_path) = SDL_GetBasePath();
+
+    // checkout detailed settings options http://magpcss.org/ceforum/apidocs/projects/%28default%29/_cef_settings_t.html
+    // nearly all the settings can be set via args too.
+    // settings.multi_threaded_message_loop = true; // not supported, except windows
+    // CefString(&settings.browser_subprocess_path).FromASCII("sub_proccess path, by default uses and starts this executeable as child");
+    // CefString(&settings.cache_path).FromASCII("");
+    // CefString(&settings.log_file).FromASCII("");
+    // settings.log_severity = LOGSEVERITY_DEFAULT;
+
+    bool bResult = CefInitialize(args, settings, nullptr, nullptr);
+    // CefInitialize creates a sub-proccess and executes the same executeable, as calling CefInitialize, if not set different in settings.browser_subprocess_path
+    // if you create an extra program just for the childproccess you only have to call CefExecuteProcess(...) in it.
+    if (!bResult)
+    {
+        // handle error
+        return -1;
+    }
+
+
+
+    return -1;
+}
+
+// CEF GLoba Variable
+// create browser-window
+CefRefPtr<CefBrowser> browser;
+CefRefPtr<BrowserClient> browserClient;
+CefRefPtr<RenderHandler> renderHandler;
+
+//SDL_Renderer*           renderer;
+
+ImVec2 g_windowPos, g_cursorPos;
+
+void  ImGui::UpdateBrowserMouse(ImVec2 windowPos, ImVec2 cursorPos)
+{
+    g_windowPos = windowPos;
+    g_cursorPos = cursorPos;
+
+//    printf("windowPos: x<%f>  y<%f>      cursorPos: x<%f>  y<%f>\n", windowPos.x, windowPos.y, cursorPos.x, cursorPos.y);
+}
+
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
+
+
+
 
 #if SDL_VERSION_ATLEAST(2,0,4) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(__amigaos4__)
 #define SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE    1
@@ -290,6 +582,22 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
             float wheel_x = (event->wheel.x > 0) ? 1.0f : (event->wheel.x < 0) ? -1.0f : 0.0f;
             float wheel_y = (event->wheel.y > 0) ? 1.0f : (event->wheel.y < 0) ? -1.0f : 0.0f;
             io.AddMouseWheelEvent(wheel_x, wheel_y);
+
+
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+            CefMouseEvent cefEvent;
+            browser->GetHost()->SendMouseWheelEvent(cefEvent, wheel_x * 20, wheel_y * 20);
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
             return true;
         }
         case SDL_MOUSEBUTTONDOWN:
@@ -305,6 +613,51 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
                 break;
             io.AddMouseButtonEvent(mouse_button, (event->type == SDL_MOUSEBUTTONDOWN));
             bd->MouseButtonsDown = (event->type == SDL_MOUSEBUTTONDOWN) ? (bd->MouseButtonsDown | (1 << mouse_button)) : (bd->MouseButtonsDown & ~(1 << mouse_button));
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+            int MAGIC_NUMBER_MOUSE_OFFSET_Y = 70;
+            CefMouseEvent cefEvent;
+            //cefEvent.x = g_windowPos.x + g_cursorPos.x + event->button.x;
+            //cefEvent.y = g_windowPos.y + g_cursorPos.y + event->button.y;
+//            cefEvent.x = event->button.x - g_windowPos.x - g_cursorPos.x;
+//            cefEvent.y = event->button.y - g_windowPos.y - g_cursorPos.y;
+            cefEvent.x = event->button.x; //- g_windowPos.x - g_cursorPos.x;
+            cefEvent.y = event->button.y - MAGIC_NUMBER_MOUSE_OFFSET_Y; //- g_windowPos.y - g_cursorPos.y;
+
+            std::cout << "####### MOUSE EVENT: x<" << cefEvent.x << ">  y<" << cefEvent.y << ">" << std::endl;
+
+//            if(mouse_button == 0) {
+//                cefEvent.modifiers = EVENTFLAG_LEFT_MOUSE_BUTTON;
+//            }
+//            if(mouse_button == 1) {
+//                cefEvent.modifiers = EVENTFLAG_RIGHT_MOUSE_BUTTON;
+//            }
+//            if(mouse_button == 2) {
+//                cefEvent.modifiers = EVENTFLAG_MIDDLE_MOUSE_BUTTON;
+//            }
+
+            browser->GetHost()->SendMouseMoveEvent(cefEvent, false);
+
+//            browser->GetHost()->SendMouseClickEvent(cefEvent, translateMouseButton(event->button), (event->type == SDL_MOUSEBUTTONUP), 1);
+
+
+            browser->GetHost()->SendMouseClickEvent(cefEvent, translateMouseButton(event->button), (event->type == SDL_MOUSEBUTTONUP), 1);
+
+
+
+
+
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
+
             return true;
         }
         case SDL_TEXTINPUT:
@@ -319,6 +672,45 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
             ImGuiKey key = ImGui_ImplSDL2_KeycodeToImGuiKey(event->key.keysym.sym);
             io.AddKeyEvent(key, (event->type == SDL_KEYDOWN));
             io.SetKeyEventNativeData(key, event->key.keysym.sym, event->key.keysym.scancode, event->key.keysym.scancode); // To support legacy indexing (<1.87 user code). Legacy backend uses SDLK_*** as indices to IsKeyXXX() functions.
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+
+           switch (event->type)
+           {
+               case SDL_KEYDOWN:
+               {
+                    CefKeyEvent cefEvent;
+                    cefEvent.modifiers = getKeyboardModifiers(event->key.keysym.mod);
+                    cefEvent.windows_key_code = getWindowsKeyCode(event->key.keysym);
+
+                    cefEvent.type = KEYEVENT_RAWKEYDOWN;
+                    browser->GetHost()->SendKeyEvent(cefEvent);
+
+                    cefEvent.type = KEYEVENT_CHAR;
+                    browser->GetHost()->SendKeyEvent(cefEvent);
+                    break;
+               }
+               case SDL_KEYUP:
+               {
+                    CefKeyEvent cefEvent;
+                    cefEvent.modifiers = getKeyboardModifiers(event->key.keysym.mod);
+                    cefEvent.windows_key_code = getWindowsKeyCode(event->key.keysym);
+                    cefEvent.type = KEYEVENT_KEYUP;
+                    browser->GetHost()->SendKeyEvent(cefEvent);
+                    break;
+               }
+           }
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
+
             return true;
         }
         case SDL_WINDOWEVENT:
@@ -447,11 +839,83 @@ static bool ImGui_ImplSDL2_Init(SDL_Window* window, SDL_Renderer* renderer, void
     if ((io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) && (io.BackendFlags & ImGuiBackendFlags_PlatformHasViewports))
         ImGui_ImplSDL2_InitPlatformInterface(window, sdl_gl_context);
 
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+    // create texture for CEF
+    int width = 800;
+    int height = 600;
+
+    // Upload texture to graphics system
+    GLint last_texture;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    glGenTextures(1, &g_CefTexture);
+    glBindTexture(GL_TEXTURE_2D, g_CefTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    //glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    // Restore state
+    glBindTexture(GL_TEXTURE_2D, last_texture);
+
+    //if(0)
+    {
+        renderHandler = new RenderHandler(width, height);
+
+        CefWindowInfo window_info;
+        CefBrowserSettings browserSettings;
+        browserSettings.javascript = STATE_ENABLED;
+
+        // browserSettings.windowless_frame_rate = 60; // 30 is default
+        window_info.SetAsWindowless(NULL); // false means no transparency (site background colour)
+        browserClient = new BrowserClient(renderHandler);
+
+        browser = CefBrowserHost::CreateBrowserSync(
+                window_info,
+                browserClient.get(),
+                "https://google.com",
+                browserSettings,
+                nullptr,
+                CefRequestContext::GetGlobalContext());
+
+        // inject user-input by calling - non-trivial for non-windows - checkout the cefclient source and the platform specific cpp, like cefclient_osr_widget_gtk.cpp for linux
+        // browser->GetHost()->SendKeyEvent(...);
+        // browser->GetHost()->SendMouseMoveEvent(...);
+        // browser->GetHost()->SendMouseClickEvent(...);
+        // browser->GetHost()->SendMouseWheelEvent(...);
+
+        //bool shutdown = false;
+        //bool js_executed = false;
+    }
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
     return true;
 }
 
 bool ImGui_ImplSDL2_InitForOpenGL(SDL_Window* window, void* sdl_gl_context)
 {
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+    browser = nullptr;
+    browserClient = nullptr;
+    renderHandler = nullptr;
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
     return ImGui_ImplSDL2_Init(window, nullptr, sdl_gl_context);
 }
 
@@ -547,6 +1011,26 @@ static void ImGui_ImplSDL2_UpdateMouseData()
                 mouse_y -= window_y;
             }
             io.AddMousePosEvent((float)mouse_x, (float)mouse_y);
+
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+            CefMouseEvent cefEvent;
+            cefEvent.x = mouse_x - g_windowPos.x - g_cursorPos.x;
+            cefEvent.y = mouse_y - g_windowPos.y - g_cursorPos.y;
+
+            browser->GetHost()->SendMouseMoveEvent(cefEvent, false);
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
+
+
         }
     }
 
@@ -666,6 +1150,22 @@ static void ImGui_ImplSDL2_UpdateMonitors()
 
 void ImGui_ImplSDL2_NewFrame()
 {
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+    // let browser process events
+    CefDoMessageLoopWork();
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
+
+
+
     ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
     IM_ASSERT(bd != nullptr && "Did you call ImGui_ImplSDL2_Init()?");
     ImGuiIO& io = ImGui::GetIO();
@@ -957,3 +1457,27 @@ static void ImGui_ImplSDL2_ShutdownPlatformInterface()
 {
     ImGui::DestroyPlatformWindows();
 }
+
+
+
+
+
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+//===[START]============================================================================================================
+ImTextureID ImGui_ImplSDL2_GetCefTexture()
+{
+    return (ImTextureID)(intptr_t)g_CefTexture;
+}
+
+
+// not good
+void ImGui::ChangeBrowserURL(char* URL)
+{
+    browser->GetMainFrame()->LoadURL(CefString(URL));
+}
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+//===[END]==============================================================================================================
+
+
